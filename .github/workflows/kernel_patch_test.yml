@@ -1,0 +1,184 @@
+name: Kernel Patch CI Test
+
+on:
+  # Triggered by API call from Argus Pipeline
+  repository_dispatch:
+    types: [test-patch]
+  
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      patch_content:
+        description: 'Patch content (base64 encoded)'
+        required: false
+        type: string
+
+jobs:
+  test-matrix:
+    name: ${{ matrix.config.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: x86_64_defconfig
+            arch: x86_64
+            defconfig: defconfig
+            cross_compile: ""
+          
+          - name: arm64_defconfig
+            arch: arm64
+            defconfig: defconfig
+            cross_compile: "aarch64-linux-gnu-"
+          
+          - name: allnoconfig
+            arch: x86_64
+            defconfig: allnoconfig
+            cross_compile: ""
+    
+    steps:
+      - name: Checkout Linux kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: torvalds/linux
+          ref: master
+          fetch-depth: 1
+          path: linux
+      
+      - name: Decode and save patch
+        env:
+          PATCH_CONTENT: ${{ github.event.client_payload.patch_content || inputs.patch_content }}
+        run: |
+          if [ -n "$PATCH_CONTENT" ]; then
+            echo "$PATCH_CONTENT" | base64 -d > /tmp/test_patch.diff
+            echo "✅ Patch decoded successfully"
+            head -20 /tmp/test_patch.diff
+          else
+            echo "❌ No patch content provided"
+            exit 1
+          fi
+      
+      - name: Apply patch to kernel source
+        working-directory: ./linux
+        run: |
+          echo "📦 Applying patch..."
+          if git apply --check /tmp/test_patch.diff; then
+            git apply /tmp/test_patch.diff
+            echo "✅ Patch applied successfully"
+          else
+            echo "❌ Patch application failed (conflicts or format errors)"
+            exit 1
+          fi
+      
+      - name: Setup build environment
+        run: |
+          echo "🔧 Installing build dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            make \
+            flex \
+            bison \
+            libssl-dev \
+            libelf-dev \
+            bc \
+            ${{ matrix.config.cross_compile != '' && 'gcc-aarch64-linux-gnu' || '' }}
+      
+      - name: Cache kernel build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            linux/.cache
+            linux/usr/include
+            linux/scripts/kconfig
+          key: ${{ runner.os }}-kernel-${{ matrix.config.name }}-${{ hashFiles('linux/Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-${{ matrix.config.name }}-
+            ${{ runner.os }}-kernel-
+      
+      - name: Configure kernel (${{ matrix.config.name }})
+        working-directory: ./linux
+        run: |
+          echo "⚙️  Configuring kernel for ${{ matrix.config.name }}..."
+          make ARCH=${{ matrix.config.arch }} CROSS_COMPILE=${{ matrix.config.cross_compile }} ${{ matrix.config.defconfig }}
+      
+      - name: Build kernel (${{ matrix.config.name }})
+        working-directory: ./linux
+        run: |
+          echo "🔨 Building kernel for ${{ matrix.config.name }}..."
+          echo "Using $(nproc) CPU cores"
+          
+          # Build and capture output
+          set +e  # Don't exit on error
+          make ARCH=${{ matrix.config.arch }} CROSS_COMPILE=${{ matrix.config.cross_compile }} -j$(nproc) 2>&1 | tee /tmp/build.log
+          BUILD_EXIT_CODE=$?
+          set -e
+          
+          # Save exit code for later
+          echo $BUILD_EXIT_CODE > /tmp/build_exit_code
+          
+          if [ $BUILD_EXIT_CODE -eq 0 ]; then
+            echo "✅ Compilation successful!"
+          else
+            echo "❌ Compilation failed with exit code $BUILD_EXIT_CODE"
+          fi
+      
+      - name: Extract errors and warnings
+        if: always()
+        run: |
+          echo "📊 Analyzing build log..."
+          
+          if [ -f /tmp/build.log ]; then
+            # Extract errors
+            grep -i "error:" /tmp/build.log | head -20 > /tmp/errors.txt || true
+            
+            # Extract warnings
+            grep -i "warning:" /tmp/build.log | head -50 > /tmp/warnings.txt || true
+            
+            # Count totals
+            ERROR_COUNT=$(wc -l < /tmp/errors.txt)
+            WARNING_COUNT=$(wc -l < /tmp/warnings.txt)
+            
+            echo "Found $ERROR_COUNT errors and $WARNING_COUNT warnings"
+            
+            # Display summary
+            if [ $ERROR_COUNT -gt 0 ]; then
+              echo ""
+              echo "=== ERRORS ==="
+              cat /tmp/errors.txt
+            fi
+            
+            if [ $WARNING_COUNT -gt 0 ]; then
+              echo ""
+              echo "=== WARNINGS ==="
+              cat /tmp/warnings.txt
+            fi
+          else
+            echo "⚠️  Build log not found"
+          fi
+      
+      - name: Upload build logs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.config.name }}
+          path: |
+            /tmp/build.log
+            /tmp/errors.txt
+            /tmp/warnings.txt
+            /tmp/build_exit_code
+          retention-days: 7
+      
+      - name: Check final result
+        run: |
+          BUILD_EXIT_CODE=$(cat /tmp/build_exit_code 2>/dev/null || echo "1")
+          
+          if [ "$BUILD_EXIT_CODE" -eq "0" ]; then
+            echo "✅ FINAL RESULT: PASS"
+            exit 0
+          else
+            echo "❌ FINAL RESULT: FAIL"
+            exit 1
+          fi
