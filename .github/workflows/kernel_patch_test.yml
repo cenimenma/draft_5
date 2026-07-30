@@ -17,7 +17,7 @@ jobs:
   test-matrix:
     name: ${{ matrix.config.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30  # Increased from 15 to handle arm64 cross-compilation
     
     strategy:
       fail-fast: false
