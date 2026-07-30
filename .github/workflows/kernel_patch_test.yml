@@ -67,9 +67,15 @@ jobs:
           if git apply --check /tmp/test_patch.diff; then
             git apply /tmp/test_patch.diff
             echo "✅ Patch applied successfully"
+            echo "0" > /tmp/patch_exit_code
           else
             echo "❌ Patch application failed (conflicts or format errors)"
-            exit 1
+            echo "1" > /tmp/patch_exit_code
+            # Create dummy files so artifact upload doesn't fail
+            echo "Patch application failed" > /tmp/build.log
+            echo "Patch conflicts detected" > /tmp/errors.txt
+            touch /tmp/warnings.txt
+            echo "1" > /tmp/build_exit_code
           fi
       
       - name: Setup build environment
@@ -106,7 +112,16 @@ jobs:
       
       - name: Build kernel (${{ matrix.config.name }})
         working-directory: ./linux
+        if: success() || (failure() && hashFiles('/tmp/patch_exit_code') != '')
         run: |
+          # Skip build if patch application failed
+          PATCH_EXIT_CODE=$(cat /tmp/patch_exit_code 2>/dev/null || echo "0")
+          if [ "$PATCH_EXIT_CODE" -eq "1" ]; then
+            echo "⏭️  Skipping compilation due to patch application failure"
+            echo "1" > /tmp/build_exit_code
+            exit 0
+          fi
+          
           echo "🔨 Building kernel for ${{ matrix.config.name }}..."
           echo "Using $(nproc) CPU cores"
           
