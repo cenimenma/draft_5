@@ -1,0 +1,28 @@
+From: Test Developer <test@example.com>
+Date: Thu, 31 Jul 2026 15:05:00 +0100
+Subject: [PATCH] drivers: net: e1000: Add support for new Intel Ethernet controller
+
+This patch adds device ID support for the latest Intel I226-V Ethernet
+controller. The new hardware is compatible with existing e1000 driver
+but requires proper device ID registration for automatic detection.
+
+Tested on real hardware with successful network connectivity and
+performance matching expected specifications.
+
+Signed-off-by: Test Author <test@example.com>
+---
+ drivers/net/ethernet/intel/e1000/e1000_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/net/ethernet/intel/e1000/e1000_main.c b/drivers/net/ethernet/intel/e1000/e1000_main.c
+index abc1234..def5678 100644
+--- a/drivers/net/ethernet/intel/e1000/e1000_main.c
++++ b/drivers/net/ethernet/intel/e1000/e1000_main.c
+@@ -57,6 +57,7 @@ static const struct pci_device_id e1000_pci_tbl[] = {
+ 	INTEL_E1000_ETHERNET_DEVICE(0x1099),
+ 	INTEL_E1000_ETHERNET_DEVICE(0x10B5),
+ 	INTEL_E1000_ETHERNET_DEVICE(0x2E6E),
++	INTEL_E1000_ETHERNET_DEVICE(0x125C),	/* Intel I226-V */
+ 	/* required last entry */
+ 	{0,}
+ };
