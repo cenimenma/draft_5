@@ -464,7 +464,8 @@ class GitHubActionsClient:
                             
                             if step_lines:
                                 all_logs.append(f"\n=== Step {step_number}: {step_name} ===")
-                                all_logs.extend(step_lines[:50])  # Limit to first 50 lines per step
+                                # Extract ALL lines from this step, not just first 50
+                                all_logs.extend(step_lines)
                 except Exception as e:
                     # Silently skip steps we can't fetch logs for
                     pass
