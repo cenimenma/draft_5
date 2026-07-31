@@ -279,13 +279,53 @@ class GitHubActionsClient:
             
             # Fallback: If artifacts are empty, try to get errors from job logs/annotations
             if not artifact_has_data or (not job_result['errors'] and job_result['status'] == 'failure'):
-                print(f"   🔄 Artifacts empty, fetching errors from job annotations...")
-                errors_from_annotations = self._get_job_annotations(job.get('id'))
+                print(f"   🔄 Artifacts empty, fetching complete job log...")
                 
-                if errors_from_annotations:
-                    job_result['errors'] = errors_from_annotations
-                    job_result['build_log'] = '\n'.join(errors_from_annotations)
-                    print(f"   ✅ Extracted {len(errors_from_annotations)} error(s) from annotations")
+                # Try to get full job log first
+                full_log = self._get_full_job_log(job.get('id'))
+                
+                if full_log:
+                    # Parse the full log to extract errors, warnings, and all output
+                    job_result['build_log'] = full_log
+                    
+                    # Extract lines that look like errors or warnings
+                    error_lines = []
+                    warning_lines = []
+                    info_lines = []
+                    
+                    for line in full_log.split('\n'):
+                        line_lower = line.lower()
+                        if 'error:' in line_lower or 'fatal:' in line_lower:
+                            error_lines.append(line.strip())
+                        elif 'warning:' in line_lower:
+                            warning_lines.append(line.strip())
+                        elif line.strip() and not line.startswith('==='):
+                            # Keep important info lines (skip section headers)
+                            if any(keyword in line_lower for keyword in ['failed', 'success', 'completed', 'exit code']):
+                                info_lines.append(line.strip())
+                    
+                    # Use extracted errors if found, otherwise use info lines
+                    if error_lines:
+                        job_result['errors'] = error_lines[:20]
+                    elif info_lines:
+                        # Use significant info lines as "errors" for context
+                        job_result['errors'] = [f"[INFO] {line}" for line in info_lines[:10]]
+                    else:
+                        # Fallback to step failure messages
+                        job_result['errors'] = [f"Step failed - see build_log for details"]
+                    
+                    job_result['warnings'] = warning_lines[:20]
+                    
+                    print(f"   ✅ Extracted {len(error_lines)} errors, {len(warning_lines)} warnings from full log")
+                else:
+                    # If full log fetch fails, fallback to annotations
+                    print(f"    Full log unavailable, using annotations as fallback...")
+                    errors_from_annotations = self._get_job_annotations(job.get('id'))
+                    
+                    if errors_from_annotations:
+                        job_result['errors'] = errors_from_annotations
+                        job_result['build_log'] = '\n'.join(errors_from_annotations)
+                        print(f"   ✅ Extracted {len(errors_from_annotations)} error(s) from annotations")
             
             results['jobs'][job_name] = job_result
         
@@ -355,6 +395,85 @@ class GitHubActionsClient:
         except Exception as e:
             print(f"   ⚠️  Error fetching annotations for job {job_id}: {e}")
             return []
+    
+    def _get_full_job_log(self, job_id: str) -> str:
+        """
+        Get complete log output for a specific job by downloading all step logs
+        
+        Args:
+            job_id: GitHub Actions job ID
+        
+        Returns:
+            Complete log text from all steps
+        """
+        if not job_id:
+            return ""
+        
+        try:
+            # Get job details to find step log URLs
+            url = f"{self.base_url}/actions/jobs/{job_id}"
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                print(f"   ⚠️  Failed to fetch job {job_id} for logs: HTTP {response.status_code}")
+                return ""
+            
+            job_data = response.json()
+            steps = job_data.get('steps', [])
+            
+            all_logs = []
+            
+            for step in steps:
+                step_name = step.get('name', 'Unknown step')
+                step_number = step.get('number')
+                
+                if not step_number:
+                    continue
+                
+                # Construct log URL for this step
+                # Format: https://api.github.com/repos/{owner}/{repo}/actions/jobs/{job_id}/logs
+                # But we need to get individual step logs
+                log_url = f"{self.base_url}/actions/jobs/{job_id}/logs"
+                
+                try:
+                    # Try to download the complete job log
+                    log_response = requests.get(log_url, headers=self.headers, allow_redirects=True)
+                    
+                    if log_response.status_code == 200:
+                        # The log is returned as plain text
+                        log_content = log_response.text
+                        
+                        # Filter to only include lines related to this step
+                        # This is a simplified approach - in reality, we'd need to parse the log format
+                        step_marker = f"##[{step_number}]"
+                        if step_marker in log_content:
+                            # Extract section for this step
+                            lines = log_content.split('\n')
+                            step_lines = []
+                            in_step_section = False
+                            
+                            for line in lines:
+                                if f"##[{step_number}]" in line:
+                                    in_step_section = True
+                                elif line.startswith("##[") and in_step_section:
+                                    # Next step started
+                                    break
+                                
+                                if in_step_section:
+                                    step_lines.append(line)
+                            
+                            if step_lines:
+                                all_logs.append(f"\n=== Step {step_number}: {step_name} ===")
+                                all_logs.extend(step_lines[:50])  # Limit to first 50 lines per step
+                except Exception as e:
+                    # Silently skip steps we can't fetch logs for
+                    pass
+            
+            return '\n'.join(all_logs)
+            
+        except Exception as e:
+            print(f"   ️  Error fetching full log for job {job_id}: {e}")
+            return ""
     
     def _download_artifact(self, artifact_id: str) -> Dict[str, str]:
         """Download and extract artifact contents (improved in-memory version)"""
