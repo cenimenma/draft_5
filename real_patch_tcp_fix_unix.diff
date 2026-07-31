@@ -1,0 +1,31 @@
+From: Test Developer <test@example.com>
+Date: Thu, 31 Jul 2026 15:00:00 +0100
+Subject: [PATCH] net: tcp: Fix potential NULL pointer dereference in tcp_connect
+
+This patch fixes a potential NULL pointer dereference that could occur
+when tcp_connect is called with invalid socket state. The issue was
+identified during code review and could lead to kernel panic in rare
+circumstances.
+
+The fix adds a proper NULL check before accessing the socket structure,
+ensuring safe operation even in edge cases.
+
+Signed-off-by: Test Author <test@example.com>
+---
+ net/ipv4/tcp_output.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index abc1234..def5678 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -3500,6 +3500,9 @@ int tcp_connect(struct sock *sk)
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct sk_buff *buff;
+ 
++	if (!sk)
++		return -EINVAL;
++
+ 	tcp_call_bpf(sk, BPF_SOCK_OPS_TCP_CONNECT_CB, 0, NULL);
+ 
+ 	if (inet_csk_connect_poll(sk))
