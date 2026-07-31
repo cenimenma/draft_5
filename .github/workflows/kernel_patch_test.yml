@@ -39,6 +39,14 @@ jobs:
             cross_compile: ""
     
     steps:
+      - name: Checkout Argus workflow repository
+        uses: actions/checkout@v4
+        with:
+          repository: cenimenma/draft_5
+          ref: master
+          fetch-depth: 1
+          path: argus-workflow
+      
       - name: Checkout Linux kernel source
         uses: actions/checkout@v4
         with:
@@ -59,6 +67,12 @@ jobs:
             echo "❌ No patch content provided"
             exit 1
           fi
+      
+      - name: Copy workflow files to Linux source
+        run: |
+          echo " Copying Argus workflow files..."
+          cp -r argus-workflow/.github/workflows/* linux/.github/workflows/ 2>/dev/null || true
+          echo "✅ Workflow files copied"
       
       - name: Apply patch to kernel source
         working-directory: ./linux
