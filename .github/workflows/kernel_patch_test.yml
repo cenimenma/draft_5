@@ -17,7 +17,7 @@ jobs:
   test-matrix:
     name: ${{ matrix.config.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Increased from 15 to handle arm64 cross-compilation
+    timeout-minutes: 45  # Increased to handle arm64 cross-compilation and full kernel builds
     
     strategy:
       fail-fast: false
@@ -62,6 +62,11 @@ jobs:
           if [ -n "$PATCH_CONTENT" ]; then
             echo "$PATCH_CONTENT" | base64 -d > /tmp/test_patch.diff
             echo "✅ Patch decoded successfully"
+            
+            # Convert Windows CRLF to Unix LF line endings
+            sed -i 's/\r$//' /tmp/test_patch.diff
+            echo "✅ Line endings converted to Unix format (LF)"
+            
             head -20 /tmp/test_patch.diff
           else
             echo "❌ No patch content provided"
