@@ -1,0 +1,25 @@
+From: Test Author <test@example.com>
+Date: Thu, 31 Jul 2026 02:00:00 +0100
+Subject: [PATCH] net/core: Introduce intentional compilation error for testing
+
+This patch introduces a deliberate compilation error to test the CI pipeline's
+error detection and reporting capabilities. It adds an undefined function call
+that will cause the compiler to fail.
+
+Signed-off-by: Test Author <test@example.com>
+---
+ net/core/dev.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/net/core/dev.c b/net/core/dev.c
+index abcdef1..1234567 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -4771,6 +4771,9 @@ int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
+ {
++	// Intentional compilation error: undefined function
++	this_function_does_not_exist();
++
+ 	struct net_device *dev = skb->dev;
+ 	struct netdev_queue *txq = NULL;
+ 	enum skb_drop_reason reason;
