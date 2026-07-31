@@ -78,18 +78,38 @@ jobs:
         working-directory: ./linux
         run: |
           echo "📦 Applying patch..."
-          if git apply --check /tmp/test_patch.diff; then
+          if git apply --check /tmp/test_patch.diff 2>/tmp/patch_error.log; then
             git apply /tmp/test_patch.diff
             echo "✅ Patch applied successfully"
             echo "0" > /tmp/patch_exit_code
           else
             echo "❌ Patch application failed (conflicts or format errors)"
             echo "1" > /tmp/patch_exit_code
-            # Create dummy files so artifact upload doesn't fail
-            echo "Patch application failed" > /tmp/build.log
-            echo "Patch conflicts detected" > /tmp/errors.txt
+            
+            # Capture detailed error information
+            PATCH_ERROR=$(cat /tmp/patch_error.log 2>/dev/null || echo "Unknown error")
+            
+            # Create detailed error files for artifact upload
+            echo "=== PATCH APPLICATION FAILED ===" > /tmp/build.log
+            echo "Patch file: /tmp/test_patch.diff" >> /tmp/build.log
+            echo "Error log:" >> /tmp/build.log
+            cat /tmp/patch_error.log >> /tmp/build.log 2>/dev/null || true
+            echo "" >> /tmp/build.log
+            echo "First 30 lines of patch:" >> /tmp/build.log
+            head -30 /tmp/test_patch.diff >> /tmp/build.log
+            
+            # Extract specific error messages
+            echo "=== ERRORS ===" > /tmp/errors.txt
+            echo "[ERROR] Patch application failed" >> /tmp/errors.txt
+            if [ -s /tmp/patch_error.log ]; then
+              grep -i "error\|fatal\|corrupt" /tmp/patch_error.log | head -10 >> /tmp/errors.txt || true
+            fi
+            echo "[ERROR] $PATCH_ERROR" >> /tmp/errors.txt
+            
             touch /tmp/warnings.txt
             echo "1" > /tmp/build_exit_code
+            
+            echo "📝 Detailed error information saved to artifacts"
           fi
       
       - name: Setup build environment
