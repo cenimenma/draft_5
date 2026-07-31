@@ -1,0 +1,14 @@
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 5933c5dab..8a203d944 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -4770,6 +4770,9 @@ struct netdev_queue *netdev_core_pick_tx(struct net_device *dev,
+  */
+ int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
+ {
++	// Intentional compilation error: undefined function
++	this_function_does_not_exist();
++
+ 	struct net_device *dev = skb->dev;
+ 	struct netdev_queue *txq = NULL;
+ 	enum skb_drop_reason reason;
