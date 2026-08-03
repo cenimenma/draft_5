@@ -69,7 +69,14 @@ jobs:
             sed -i 's/\r$//' /tmp/test_patch.diff
             echo "✅ Line endings converted to Unix format (LF)"
             
-            head -20 /tmp/test_patch.diff
+            echo "=== PATCH CONTENT DEBUG ==="
+            echo "Patch file size: $(wc -c < /tmp/test_patch.diff) bytes"
+            echo "Patch file lines: $(wc -l < /tmp/test_patch.diff) lines"
+            echo "First 10 lines of decoded patch:"
+            head -10 /tmp/test_patch.diff
+            echo "Files modified by this patch:"
+            grep -E "^\+\+\+ b/" /tmp/test_patch.diff || echo "No +++ lines found"
+            echo "============================="
           else
             echo "❌ No patch content provided"
             exit 1
