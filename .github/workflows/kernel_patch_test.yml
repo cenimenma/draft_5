@@ -12,12 +12,84 @@ on:
         description: 'Patch content (base64 encoded)'
         required: false
         type: string
+      kernel_ref:
+        description: 'Kernel git ref (default: master)'
+        required: false
+        default: 'master'
+        type: string
 
 jobs:
+  checkpatch:
+    name: checkpatch.pl
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Linux kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: torvalds/linux
+          ref: ${{ inputs.kernel_ref || 'master' }}
+          fetch-depth: 1
+          path: linux
+
+      - name: Decode and save patch
+        env:
+          PATCH_CONTENT: ${{ github.event.client_payload.patch_content || inputs.patch_content }}
+        run: |
+          if [ -n "$PATCH_CONTENT" ]; then
+            echo "$PATCH_CONTENT" | base64 -d > /tmp/test_patch.diff
+            sed -i 's/\r$//' /tmp/test_patch.diff
+            echo "✅ Patch decoded ($(wc -l < /tmp/test_patch.diff) lines)"
+          else
+            echo "❌ No patch content provided"
+            exit 1
+          fi
+
+      - name: Run checkpatch.pl
+        run: |
+          echo "🔍 Running checkpatch.pl..."
+          cd linux
+          perl scripts/checkpatch.pl --no-tree --terse /tmp/test_patch.diff 2>&1 | tee /tmp/checkpatch_output.txt
+          CHECKPATCH_EXIT=${PIPESTATUS[1]}
+          
+          # Parse results
+          ERRORS=$(grep -c "^ERROR:" /tmp/checkpatch_output.txt 2>/dev/null || echo 0)
+          WARNINGS=$(grep -c "^WARNING:" /tmp/checkpatch_output.txt 2>/dev/null || echo 0)
+          
+          echo ""
+          echo "=== checkpatch.pl Summary ==="
+          echo "Errors: $ERRORS"
+          echo "Warnings: $WARNINGS"
+          echo "Exit code: $CHECKPATCH_EXIT"
+          
+          # Save results
+          echo "$ERRORS" > /tmp/checkpatch_errors.txt
+          echo "$WARNINGS" > /tmp/checkpatch_warnings.txt
+          echo "$CHECKPATCH_EXIT" > /tmp/checkpatch_exit_code.txt
+          
+          # Show full output
+          if [ -s /tmp/checkpatch_output.txt ]; then
+            echo ""
+            echo "=== Full checkpatch output ==="
+            cat /tmp/checkpatch_output.txt
+          fi
+
+      - name: Upload checkpatch results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkpatch-results
+          path: |
+            /tmp/checkpatch_output.txt
+            /tmp/checkpatch_errors.txt
+            /tmp/checkpatch_warnings.txt
+            /tmp/checkpatch_exit_code.txt
+          retention-days: 7
+
   test-matrix:
     name: ${{ matrix.config.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # Reduced from 45 since arm64 cross-compilation removed
+    timeout-minutes: ${{ matrix.config.timeout }}
     
     strategy:
       fail-fast: false
@@ -27,18 +99,25 @@ jobs:
             arch: x86_64
             defconfig: defconfig
             cross_compile: ""
-          
-          # Commented out arm64 due to timeout issues (30-45+ min with cross-compilation)
-          # Uncomment if ARM testing is needed and runner performance improves
-          # - name: arm64_defconfig
-          #   arch: arm64
-          #   defconfig: defconfig
-          #   cross_compile: "aarch64-linux-gnu-"
+            timeout: 20
           
           - name: tinyconfig
             arch: x86_64
-            defconfig: tinyconfig  # Minimal kernel, fastest compilation (~5 min)
+            defconfig: tinyconfig
             cross_compile: ""
+            timeout: 15
+          
+          - name: x86_64_allmodconfig
+            arch: x86_64
+            defconfig: allmodconfig
+            cross_compile: ""
+            timeout: 30
+          
+          - name: arm64_defconfig
+            arch: arm64
+            defconfig: defconfig
+            cross_compile: "aarch64-linux-gnu-"
+            timeout: 35
     
     steps:
       - name: Checkout Argus workflow repository
@@ -53,7 +132,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: torvalds/linux
-          ref: master
+          ref: ${{ inputs.kernel_ref || 'master' }}
           fetch-depth: 1
           path: linux
       
@@ -63,20 +142,11 @@ jobs:
         run: |
           if [ -n "$PATCH_CONTENT" ]; then
             echo "$PATCH_CONTENT" | base64 -d > /tmp/test_patch.diff
-            echo "✅ Patch decoded successfully"
-            
-            # Convert Windows CRLF to Unix LF line endings
             sed -i 's/\r$//' /tmp/test_patch.diff
-            echo "✅ Line endings converted to Unix format (LF)"
+            echo "✅ Patch decoded ($(wc -l < /tmp/test_patch.diff) lines)"
             
-            echo "=== PATCH CONTENT DEBUG ==="
-            echo "Patch file size: $(wc -c < /tmp/test_patch.diff) bytes"
-            echo "Patch file lines: $(wc -l < /tmp/test_patch.diff) lines"
-            echo "First 10 lines of decoded patch:"
-            head -10 /tmp/test_patch.diff
-            echo "Files modified by this patch:"
-            grep -E "^\+\+\+ b/" /tmp/test_patch.diff || echo "No +++ lines found"
-            echo "============================="
+            echo "Files modified:"
+            grep -E "^\+\+\+ b/" /tmp/test_patch.diff || echo "  (none found)"
           else
             echo "❌ No patch content provided"
             exit 1
@@ -84,9 +154,7 @@ jobs:
       
       - name: Copy workflow files to Linux source
         run: |
-          echo " Copying Argus workflow files..."
           cp -r argus-workflow/.github/workflows/* linux/.github/workflows/ 2>/dev/null || true
-          echo "✅ Workflow files copied"
       
       - name: Apply patch to kernel source
         working-directory: ./linux
@@ -97,13 +165,11 @@ jobs:
             echo "✅ Patch applied successfully"
             echo "0" > /tmp/patch_exit_code
           else
-            echo "❌ Patch application failed (conflicts or format errors)"
+            echo "❌ Patch application failed"
             echo "1" > /tmp/patch_exit_code
             
-            # Capture detailed error information
             PATCH_ERROR=$(cat /tmp/patch_error.log 2>/dev/null || echo "Unknown error")
             
-            # Create detailed error files for artifact upload
             echo "=== PATCH APPLICATION FAILED ===" > /tmp/build.log
             echo "Patch file: /tmp/test_patch.diff" >> /tmp/build.log
             echo "Error log:" >> /tmp/build.log
@@ -112,18 +178,14 @@ jobs:
             echo "First 30 lines of patch:" >> /tmp/build.log
             head -30 /tmp/test_patch.diff >> /tmp/build.log
             
-            # Extract specific error messages
             echo "=== ERRORS ===" > /tmp/errors.txt
             echo "[ERROR] Patch application failed" >> /tmp/errors.txt
             if [ -s /tmp/patch_error.log ]; then
               grep -i "error\|fatal\|corrupt" /tmp/patch_error.log | head -10 >> /tmp/errors.txt || true
             fi
-            echo "[ERROR] $PATCH_ERROR" >> /tmp/errors.txt
             
             touch /tmp/warnings.txt
             echo "1" > /tmp/build_exit_code
-            
-            echo "📝 Detailed error information saved to artifacts"
           fi
       
       - name: Setup build environment
@@ -162,10 +224,9 @@ jobs:
         working-directory: ./linux
         if: success() || (failure() && hashFiles('/tmp/patch_exit_code') != '')
         run: |
-          # Skip build if patch application failed
           PATCH_EXIT_CODE=$(cat /tmp/patch_exit_code 2>/dev/null || echo "0")
           if [ "$PATCH_EXIT_CODE" -eq "1" ]; then
-            echo "⏭️  Skipping compilation due to patch application failure"
+            echo "⏭️  Skipping compilation - patch did not apply"
             echo "1" > /tmp/build_exit_code
             exit 0
           fi
@@ -173,13 +234,11 @@ jobs:
           echo "🔨 Building kernel for ${{ matrix.config.name }}..."
           echo "Using $(nproc) CPU cores"
           
-          # Build and capture output
-          set +e  # Don't exit on error
-          make ARCH=${{ matrix.config.arch }} CROSS_COMPILE=${{ matrix.config.cross_compile }} -j$(nproc) 2>&1 | tee /tmp/build.log
+          set +e
+          make ARCH=${{ matrix.config.arch }} CROSS_COMPILE=${{ matrix.config.cross_compile }} W=1 -j$(nproc) 2>&1 | tee /tmp/build.log
           BUILD_EXIT_CODE=$?
           set -e
           
-          # Save exit code for later
           echo $BUILD_EXIT_CODE > /tmp/build_exit_code
           
           if [ $BUILD_EXIT_CODE -eq 0 ]; then
@@ -191,30 +250,20 @@ jobs:
       - name: Extract errors and warnings
         if: always()
         run: |
-          echo "📊 Analyzing build log..."
-          
           if [ -f /tmp/build.log ]; then
-            # Extract errors
             grep -i "error:" /tmp/build.log | head -20 > /tmp/errors.txt || true
-            
-            # Extract warnings
             grep -i "warning:" /tmp/build.log | head -50 > /tmp/warnings.txt || true
             
-            # Count totals
             ERROR_COUNT=$(wc -l < /tmp/errors.txt)
             WARNING_COUNT=$(wc -l < /tmp/warnings.txt)
             
             echo "Found $ERROR_COUNT errors and $WARNING_COUNT warnings"
             
-            # Display summary
             if [ $ERROR_COUNT -gt 0 ]; then
-              echo ""
               echo "=== ERRORS ==="
               cat /tmp/errors.txt
             fi
-            
             if [ $WARNING_COUNT -gt 0 ]; then
-              echo ""
               echo "=== WARNINGS ==="
               cat /tmp/warnings.txt
             fi
@@ -237,7 +286,6 @@ jobs:
       - name: Check final result
         run: |
           BUILD_EXIT_CODE=$(cat /tmp/build_exit_code 2>/dev/null || echo "1")
-          
           if [ "$BUILD_EXIT_CODE" -eq "0" ]; then
             echo "✅ FINAL RESULT: PASS"
             exit 0
