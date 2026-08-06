@@ -1,0 +1,159 @@
+name: Batch Patch Compile (T2)
+
+# Argus 评估 T2 级动态信号：对单个 patch 做 v6.15 上的 apply + 定向编译验证
+# 相比 kernel_patch_test.yml 的全量编译，本 workflow 只编译 patch 触及的子目录，
+# 单次运行从 20-35 分钟降到约 3-6 分钟，适配批量评估（~45 个样本 ≈ 4-7 小时配额）
+#
+# 触发方式：
+#   1. repository_dispatch event_type=compile-patch，client_payload.patch_content = base64(diff)
+#   2. 手动 workflow_dispatch（粘贴 base64 或留空做自检）
+
+on:
+  repository_dispatch:
+    types: [compile-patch]
+
+  workflow_dispatch:
+    inputs:
+      patch_content:
+        description: 'Patch content (base64 encoded)'
+        required: false
+        type: string
+      kernel_ref:
+        description: 'Kernel git ref'
+        required: false
+        default: 'v6.15'
+        type: string
+
+env:
+  KERNEL_REF: ${{ github.event.client_payload.kernel_ref || inputs.kernel_ref || 'v6.15' }}
+
+jobs:
+  compile-test:
+    name: apply + targeted compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Linux kernel (${{ env.KERNEL_REF }})
+        uses: actions/checkout@v4
+        with:
+          repository: torvalds/linux
+          ref: ${{ env.KERNEL_REF }}
+          fetch-depth: 1
+          path: linux
+
+      - name: Decode and save patch
+        env:
+          PATCH_CONTENT: ${{ github.event.client_payload.patch_content || inputs.patch_content }}
+        run: |
+          if [ -n "$PATCH_CONTENT" ]; then
+            echo "$PATCH_CONTENT" | base64 -d > /tmp/test_patch.diff
+            sed -i 's/\r$//' /tmp/test_patch.diff
+            echo "✅ Patch decoded ($(wc -l < /tmp/test_patch.diff) lines)"
+            echo "Files modified:"
+            grep -E "^\+\+\+ b/" /tmp/test_patch.diff || echo "  (none found)"
+          else
+            echo "❌ No patch content provided"
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc make flex bison libssl-dev libelf-dev bc > /dev/null
+
+      - name: Apply patch
+        working-directory: ./linux
+        run: |
+          set +e
+          git apply --check /tmp/test_patch.diff 2>/tmp/patch_error.log
+          CHECK_EXIT=$?
+          set -e
+
+          if [ $CHECK_EXIT -ne 0 ]; then
+            echo "❌ PATCH_APPLY_FAIL" | tee /tmp/result_summary.txt
+            cat /tmp/patch_error.log
+            exit 1
+          fi
+
+          git apply /tmp/test_patch.diff
+          echo "✅ Patch applied successfully"
+          echo "APPLY_OK" >> /tmp/result_summary.txt
+
+      - name: Configure kernel (x86_64 defconfig)
+        working-directory: ./linux
+        run: |
+          make -s defconfig
+          echo "✅ defconfig done"
+
+      - name: Prepare build (scripts + headers)
+        working-directory: ./linux
+        run: |
+          make -s prepare modules_prepare -j$(nproc)
+          echo "✅ prepare done"
+
+      - name: Targeted compile of touched directories
+        working-directory: ./linux
+        run: |
+          # 提取 patch 触及的文件（仅 .c/.S/.h），归并到其所在子目录
+          TARGETS=$(grep -E "^\+\+\+ b/" /tmp/test_patch.diff \
+                    | sed 's|^+++ b/||' \
+                    | grep -E '\.(c|S)$' \
+                    | sort -u)
+
+          if [ -z "$TARGETS" ]; then
+            echo "⚠️ Patch touches no compilable .c/.S files (header-only or non-code)"
+            echo "NO_COMPILE_TARGET" >> /tmp/result_summary.txt
+            exit 0
+          fi
+
+          # 策略：先逐文件编译（最快，覆盖语法/类型错误），
+          # 再编译触及子目录的 built-in.a（覆盖链接级符号问题）
+          FAIL=0
+          echo "=== Per-file object compile ==="
+          for f in $TARGETS; do
+            obj="${f%.c}.o"
+            obj="${obj%.S}.o"
+            echo "--> make $obj"
+            if ! make -s "$obj" 2>/tmp/one_err.log; then
+              echo "❌ $obj failed"
+              cat /tmp/one_err.log
+              FAIL=1
+            fi
+          done
+
+          DIRS=$(echo "$TARGETS" | xargs -n1 dirname | sort -u)
+          echo "=== Directory built-in compile ==="
+          for d in $DIRS; do
+            echo "--> make $d/"
+            if ! make -s "$d/" 2>>/tmp/one_err.log; then
+              echo "❌ $d/ failed"
+              tail -30 /tmp/one_err.log
+              FAIL=1
+            fi
+          done
+
+          if [ $FAIL -ne 0 ]; then
+            echo "❌ COMPILE_FAIL" >> /tmp/result_summary.txt
+            exit 1
+          fi
+
+          echo "✅ COMPILE_OK" >> /tmp/result_summary.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== RESULT SUMMARY (kernel $KERNEL_REF) ==="
+          cat /tmp/result_summary.txt 2>/dev/null || echo "UNKNOWN (job aborted early)"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-test-logs-${{ github.run_id }}
+          path: |
+            /tmp/result_summary.txt
+            /tmp/patch_error.log
+            /tmp/one_err.log
+          retention-days: 14
+          if-no-files-found: ignore
